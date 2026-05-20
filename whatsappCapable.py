@@ -1,65 +1,59 @@
-import pyautogui
-import pyperclip
-import pytesseract
 import time
-import re
-import locator
-from jennyModelAndStandards import ask
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+import pyperclip
+import pyautogui
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from jennyModelAndStandards import ask_with_retry
 
-# CONFIG 
-CHAT_REGION = (923, 323, 1876 , 1205)  # (x, y, width, height) — adjust to your screen
+#CONFIG
 POLL_INTERVAL = 2.0
-DIRECTED_PATTERNS = [r"jenny[,\s]", r"גני[,\s]", r"ג[׳']ני[,\s]"]
+TRIGGERS = ["jenny", "גני", "ג׳ני", "ג'ני"]
 
 last_processed = ""
 
-# OCR 
-def get_chat_text():
-    screenshot = pyautogui.screenshot(region=CHAT_REGION)
-    text = pytesseract.image_to_string(screenshot, lang='heb+eng')
-    return text
+#CONNECT TO EXISTING CHROME
+def connect():
+    options = Options()
+    options.debugger_address = "localhost:9222"
+    driver = webdriver.Chrome(options=options)
+    return driver
 
-# PARSE 
-def extract_message(chat_text):
-    lines = [l.strip() for l in chat_text.split('\n') if l.strip()]
-    target = None
-    for line in lines:
-        if any(re.search(p, line.lower()) for p in DIRECTED_PATTERNS):
-            target = line
-    return target
+#GET LATEST MESSAGE
+def get_latest_message(driver):
+    messages = driver.find_elements(By.CSS_SELECTOR, "span[data-testid='selectable-text']")
+    if not messages:
+        return None
+    return messages[-1].text.strip()
 
-# AI 
-def ask_jenny(message):
-    return ask(message)
-
-# SEND 
-def messenger(message):
-    location = locator.locateOnScreen(
-        r'C:\Users\alonp\documents\degree\year1\CS\WhatsappBot\whatsapp_bot_images\TextLine.png',
-        confidence=0.85
-    )
-    pyautogui.click(location)
-    pyperclip.copy(message)
+#SEND RESPONSE
+def messenger(driver, response):
+    input_box = driver.find_element(By.CSS_SELECTOR, "div[data-testid='conversation-compose-box-input']")
+    input_box.click()
+    pyperclip.copy(response)
     pyautogui.hotkey('ctrl', 'v')
-    time.sleep(0.1)
-    pyautogui.press('enter')
+    time.sleep(0.2)
+    input_box.send_keys(Keys.ENTER)
 
-# MAIN LOOP 
+#MAIN LOOP
 def main():
     global last_processed
+    print("Connecting to Chrome...")
+    driver = connect()
     print("Jenny is listening... (Ctrl+C to stop)")
+
     while True:
         try:
-            chat_text = get_chat_text()
-            message = extract_message(chat_text)
+            message = get_latest_message(driver)
 
             if message and message != last_processed:
-                last_processed = message
-                print(f"Triggered: {message}")
-                response = ask_jenny(message)
-                print(f"Jenny: {response}")
-                messenger(response)
+                if any(t in message.lower() for t in TRIGGERS):
+                    last_processed = message
+                    print(f"Triggered: {message}")
+                    response = ask_with_retry(message)
+                    print(f"Jenny: {response}")
+                    messenger(driver, response)
 
         except Exception as e:
             print(f"Error: {e}")

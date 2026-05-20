@@ -1,4 +1,5 @@
 import os
+import time
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
@@ -26,6 +27,15 @@ def ask(prompt):
         )
     )
     return response.text
+
+def ask_with_retry(prompt, retries=3):
+    for attempt in range(retries):
+        try:
+            return ask(prompt)
+        except Exception as e:
+            print(f"Attempt {attempt+1} failed: {e}")
+            time.sleep(2)
+    return "Sorry, I couldn't get a response right now."
 
 if __name__ == "__main__":
     prompt = input("Enter your prompt: ")
