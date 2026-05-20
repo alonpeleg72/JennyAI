@@ -1,14 +1,13 @@
 import os
 from google import genai
-from google.genai import types 
+from google.genai import types
 from dotenv import load_dotenv
 
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
 
 if not api_key:
-    print("Error: GEMINI_API_KEY not found!")
-    exit()
+    raise EnvironmentError("GEMINI_API_KEY not found in .env")
 
 client = genai.Client(api_key=api_key)
 
@@ -18,14 +17,16 @@ jenny_personality = (
     "clear and helpful, and occasionally use coding humor or emojis where appropriate."
 )
 
-contents = input("Enter your prompt: ") 
-
-response = client.models.generate_content(
-    model='gemma-4-26b-a4b-it',
-    contents=contents,
-    config=types.GenerateContentConfig(
-        system_instruction=jenny_personality
+def ask(prompt):
+    response = client.models.generate_content(
+        model='gemma-4-26b-a4b-it',
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=jenny_personality
+        )
     )
-)
+    return response.text
 
-print(f"\n{response.text}")
+if __name__ == "__main__":
+    prompt = input("Enter your prompt: ")
+    print(f"\n{ask(prompt)}")

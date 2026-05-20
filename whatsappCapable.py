@@ -1,4 +1,3 @@
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 import pyautogui
 import pyperclip
 import pytesseract
@@ -6,9 +5,10 @@ import time
 import re
 import locator
 from jennyModelAndStandards import ask
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 # CONFIG 
-CHAT_REGION = (700, 100, 900, 800)  # (x, y, width, height) — adjust to your screen
+CHAT_REGION = (923, 323, 1876 , 1205)  # (x, y, width, height) — adjust to your screen
 POLL_INTERVAL = 2.0
 DIRECTED_PATTERNS = [r"jenny[,\s]", r"גני[,\s]", r"ג[׳']ני[,\s]"]
 
