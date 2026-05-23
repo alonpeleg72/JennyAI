@@ -25,14 +25,14 @@ RESPONSE_COOLDOWN = 5
 TRIGGERS = ["jenny", "גני", "ג׳ני", "ג'ני"]
 MAX_CONCURRENT_REQUESTS = 10
 
-# Counter of (sender, text) seen so far since launch.
-# A message is "new" if its current DOM count exceeds what we've already processed.
-# This handles: duplicate sends, virtual DOM churn, same-minute timestamps.
-processed_counts = Counter()   # (sender, text) -> how many we've already dispatched
-pending = []                   # messages waiting out the cooldown: (sender, text, personality, cleaned)
+processed_counts = Counter()  # (sender, text) -> how many we've already dispatched
+# pending_cooldown: set of (sender, message) waiting for cooldown - set prevents duplicates
+pending_cooldown = set()
+# Texts Jenny sent - scraper skips these so Jenny never responds to herself
+jenny_sent = set()
+
 seen_lock = None
 semaphore = None
-
 executor = ThreadPoolExecutor(max_workers=6)
 last_response_time = 0
 
@@ -45,19 +45,20 @@ def connect():
 
 
 def scrape_all_messages(driver):
-    """Return a Counter of (sender, text) for every INCOMING message in the DOM.
-    Outgoing messages (sent by Jenny) have no data-pre-plain-text attribute,
-    so any container where that attribute is missing or has no sender is skipped."""
+    """Return a Counter of (sender, text) for incoming messages only.
+    Skips any message whose text matches something Jenny already sent."""
     counts = Counter()
     containers = driver.find_elements(By.CSS_SELECTOR, "div.copyable-text")
     for container in containers:
         try:
             pre = container.get_attribute("data-pre-plain-text")
             if not pre:
-                continue  # no pre-plain-text = outgoing message, skip
+                continue  # outgoing messages have no data-pre-plain-text
             text = container.find_element(
                 By.CSS_SELECTOR, "span[data-testid='selectable-text']"
             ).text.strip()
+            if _normalize(text) in jenny_sent:
+                continue  # this is Jenny's own response, skip it
             match = re.search(r'\] (.+?):', pre)
             sender = match.group(1).strip() if match else None
             if sender and text:
@@ -67,7 +68,12 @@ def scrape_all_messages(driver):
     return counts
 
 
+def _normalize(text):
+    """Collapse all whitespace/newlines to single spaces for comparison."""
+    return re.sub(r'\s+', ' ', text).strip()
+
 def messenger(driver, response):
+    jenny_sent.add(_normalize(response))  # mark before sending so scraper ignores it
     input_box = driver.find_element(
         By.CSS_SELECTOR, "div[data-testid='conversation-compose-box-input']"
     )
@@ -92,35 +98,36 @@ async def handle_message(driver, sender, message, personality_override, loop):
             print(f"[Error] {sender}: {e}")
 
 
-def try_dispatch(driver, sender, message, loop):
+def try_dispatch(driver, sender, message, loop, silent=False):
     """
-    Resolve macro and dispatch if trigger matches.
-    Returns True if dispatched (or permanently skipped), False if cooldown blocked it.
+    Dispatch the message if cooldown allows.
+    Returns True if dispatched or permanently skipped, False if cooldown blocked it.
+    silent=True suppresses macro print (used during cooldown retries).
     """
     global last_response_time
 
-    personality_override, cleaned = resolve_macro(message)
+    personality_override, cleaned = resolve_macro(message, silent=silent)
 
     if personality_override == "__help__":
-        return True  # handled, don't requeue
+        return True
 
     if personality_override is not None:
         if not cleaned:
-            return True  # macro with no actual prompt, skip
+            return True
         if time.time() - last_response_time < RESPONSE_COOLDOWN:
-            return False  # blocked by cooldown, caller will retry
+            return False
         last_response_time = time.time()
         asyncio.create_task(handle_message(driver, sender, cleaned, personality_override, loop))
         return True
 
     if any(t in message.lower() for t in TRIGGERS):
         if time.time() - last_response_time < RESPONSE_COOLDOWN:
-            return False  # blocked by cooldown, caller will retry
+            return False
         last_response_time = time.time()
         asyncio.create_task(handle_message(driver, sender, message, None, loop))
         return True
 
-    return True  # not a trigger, permanently skip
+    return True  # not a trigger, skip permanently
 
 
 async def main():
@@ -133,20 +140,16 @@ async def main():
     loop = asyncio.get_event_loop()
     driver = await loop.run_in_executor(executor, connect)
 
-    # Snapshot all messages that already exist - we will never process these
     baseline = await loop.run_in_executor(executor, scrape_all_messages, driver)
     processed_counts.update(baseline)
     print(f"Baseline: {sum(baseline.values())} existing messages ignored.")
     print(f"Jenny is listening with up to {MAX_CONCURRENT_REQUESTS} concurrent requests... (Ctrl+C to stop)")
 
-    # pending_cooldown: list of (sender, message) waiting for cooldown to expire
-    pending_cooldown = []
-
     while True:
         try:
             current = await loop.run_in_executor(executor, scrape_all_messages, driver)
 
-            # Find genuinely new messages: current count exceeds processed count
+            # Detect genuinely new messages
             new_messages = []
             for key, count in current.items():
                 extra = count - processed_counts[key]
@@ -154,26 +157,24 @@ async def main():
                     sender, text = key
                     for _ in range(extra):
                         new_messages.append((sender, text))
+                        # Mark as processed immediately so next poll doesn't re-detect it
+                        # even if cooldown holds it in pending
+                        processed_counts[key] += 1
 
             for sender, message in new_messages:
                 print(f"[Queue] {sender}: {message!r}")
                 dispatched = try_dispatch(driver, sender, message, loop)
-                if dispatched:
-                    processed_counts[(sender, message)] += 1
-                else:
-                    # Cooldown blocked it - hold it and retry next poll
+                if not dispatched:
                     print(f"[Cooldown] Holding: {sender}: {message!r}")
-                    pending_cooldown.append((sender, message))
+                    pending_cooldown.add((sender, message))
 
-            # Retry anything that was blocked by cooldown
-            still_pending = []
-            for sender, message in pending_cooldown:
-                dispatched = try_dispatch(driver, sender, message, loop)
+            # Retry cooldown-held messages - use a snapshot to avoid mutation during iteration
+            for item in list(pending_cooldown):
+                sender, message = item
+                dispatched = try_dispatch(driver, sender, message, loop, silent=True)
                 if dispatched:
-                    processed_counts[(sender, message)] += 1
-                else:
-                    still_pending.append((sender, message))
-            pending_cooldown = still_pending
+                    pending_cooldown.discard(item)
+                    print(f"[Cooldown] Released: {sender}: {message!r}")
 
         except Exception as e:
             print(f"[Error] {e}")

@@ -9,7 +9,7 @@ MACRO_KEYWORDS = {
 MACRO_STRIP = list(MACRO_KEYWORDS.keys())
 
 
-def resolve_macro(message_text):
+def resolve_macro(message_text, silent=False):
     """
     Returns (personality_override, cleaned_message) if a macro keyword is found,
     where cleaned_message has the keyword stripped out.
@@ -18,11 +18,14 @@ def resolve_macro(message_text):
 
     Special case: 'help' / 'עזרה' prints help and returns ("__help__", None)
     so the caller knows to skip the AI call entirely.
+
+    silent=True suppresses console output (used during cooldown retries).
     """
     msg_lower = message_text.lower()
 
     if "help" in msg_lower or "עזרה" in message_text:
-        print(_get_help_text())
+        if not silent:
+            print(_get_help_text())
         return ("__help__", None)
 
     for keyword, personality in MACRO_KEYWORDS.items():
@@ -31,7 +34,8 @@ def resolve_macro(message_text):
             for kw in MACRO_STRIP:
                 cleaned = cleaned.replace(kw, "").replace(kw.lower(), "")
             cleaned = cleaned.strip()
-            print(f"[Macro] One-shot personality: {personality} | Prompt: {cleaned!r}")
+            if not silent:
+                print(f"[Macro] One-shot personality: {personality} | Prompt: {cleaned!r}")
             return (personality, cleaned)
 
     return (None, None)
