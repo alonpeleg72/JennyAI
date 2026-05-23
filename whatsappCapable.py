@@ -1,14 +1,16 @@
 import time
 import re
+import asyncio
 import pyperclip
 import pyautogui
+from concurrent.futures import ThreadPoolExecutor
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from jennyModelAndStandards import ask_with_retry
-from macros import check_macro
-from collections import deque
+from macros import resolve_macro
+from collections import Counter
 
 """
 1.USE THE FOLLOWING COMMAND TO START CHROME TO START THE PROGRAM:
@@ -17,88 +19,167 @@ from collections import deque
 3. RUN THE SCRIPT
 """
 
-#CONFIG
-POLL_INTERVAL = 2.0
-RESPONSE_COOLDOWN = 10
+# CONFIG
+POLL_INTERVAL = 0.8
+RESPONSE_COOLDOWN = 5
 TRIGGERS = ["jenny", "גני", "ג׳ני", "ג'ני"]
-queue = deque(maxlen=10)
-last_processed = ""
-last_queue_reset = time.time()
+MAX_CONCURRENT_REQUESTS = 10
+
+# Counter of (sender, text) seen so far since launch.
+# A message is "new" if its current DOM count exceeds what we've already processed.
+# This handles: duplicate sends, virtual DOM churn, same-minute timestamps.
+processed_counts = Counter()   # (sender, text) -> how many we've already dispatched
+pending = []                   # messages waiting out the cooldown: (sender, text, personality, cleaned)
+seen_lock = None
+semaphore = None
+
+executor = ThreadPoolExecutor(max_workers=6)
 last_response_time = 0
 
-#CONNECT TO EXISTING CHROME
+
 def connect():
     options = Options()
     options.debugger_address = "localhost:9222"
     driver = webdriver.Chrome(options=options)
     return driver
 
-#GET LATEST MESSAGE WITH SENDER
-def get_latest_message_with_sender(driver):
+
+def scrape_all_messages(driver):
+    """Return a Counter of (sender, text) for every INCOMING message in the DOM.
+    Outgoing messages (sent by Jenny) have no data-pre-plain-text attribute,
+    so any container where that attribute is missing or has no sender is skipped."""
+    counts = Counter()
     containers = driver.find_elements(By.CSS_SELECTOR, "div.copyable-text")
-    if not containers:
-        return
-    latest = containers[-1]
-    pre = latest.get_attribute("data-pre-plain-text")
-    text = latest.find_element(By.CSS_SELECTOR, "span[data-testid='selectable-text']").text.strip()
+    for container in containers:
+        try:
+            pre = container.get_attribute("data-pre-plain-text")
+            if not pre:
+                continue  # no pre-plain-text = outgoing message, skip
+            text = container.find_element(
+                By.CSS_SELECTOR, "span[data-testid='selectable-text']"
+            ).text.strip()
+            match = re.search(r'\] (.+?):', pre)
+            sender = match.group(1).strip() if match else None
+            if sender and text:
+                counts[(sender, text)] += 1
+        except Exception:
+            continue
+    return counts
 
-    match = re.search(r'\] (.+?):', pre)
-    sender = match.group(1).strip() if match else None
 
-    queue.append((sender, text))
-
-#SEND RESPONSE
-def messenger(driver, sender, response):
-    input_box = driver.find_element(By.CSS_SELECTOR, "div[data-testid='conversation-compose-box-input']")
+def messenger(driver, response):
+    input_box = driver.find_element(
+        By.CSS_SELECTOR, "div[data-testid='conversation-compose-box-input']"
+    )
     input_box.click()
-    time.sleep(0.2)
-
-    input_box.send_keys(f"@{sender}")
-    time.sleep(0.5)
-    input_box.send_keys(Keys.ENTER)
-    time.sleep(0.2)
-
+    time.sleep(0.1)
     pyperclip.copy(response)
     pyautogui.hotkey('ctrl', 'v')
-    time.sleep(0.2)
-
+    time.sleep(0.1)
     input_box.send_keys(Keys.ENTER)
 
-#MAIN LOOP
-def main():
-    global last_processed, last_queue_reset, last_response_time
+
+async def handle_message(driver, sender, message, personality_override, loop):
+    async with semaphore:
+        print(f"[Processing] {sender}: {message!r}")
+        try:
+            response = await loop.run_in_executor(
+                executor, ask_with_retry, message, personality_override
+            )
+            print(f"Jenny -> {sender}: {response}")
+            await loop.run_in_executor(executor, messenger, driver, response)
+        except Exception as e:
+            print(f"[Error] {sender}: {e}")
+
+
+def try_dispatch(driver, sender, message, loop):
+    """
+    Resolve macro and dispatch if trigger matches.
+    Returns True if dispatched (or permanently skipped), False if cooldown blocked it.
+    """
+    global last_response_time
+
+    personality_override, cleaned = resolve_macro(message)
+
+    if personality_override == "__help__":
+        return True  # handled, don't requeue
+
+    if personality_override is not None:
+        if not cleaned:
+            return True  # macro with no actual prompt, skip
+        if time.time() - last_response_time < RESPONSE_COOLDOWN:
+            return False  # blocked by cooldown, caller will retry
+        last_response_time = time.time()
+        asyncio.create_task(handle_message(driver, sender, cleaned, personality_override, loop))
+        return True
+
+    if any(t in message.lower() for t in TRIGGERS):
+        if time.time() - last_response_time < RESPONSE_COOLDOWN:
+            return False  # blocked by cooldown, caller will retry
+        last_response_time = time.time()
+        asyncio.create_task(handle_message(driver, sender, message, None, loop))
+        return True
+
+    return True  # not a trigger, permanently skip
+
+
+async def main():
+    global semaphore, seen_lock, processed_counts
+
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+    seen_lock = asyncio.Lock()
+
     print("Connecting to Chrome...")
-    driver = connect()
-    print("Jenny is listening... (Ctrl+C to stop)")
+    loop = asyncio.get_event_loop()
+    driver = await loop.run_in_executor(executor, connect)
+
+    # Snapshot all messages that already exist - we will never process these
+    baseline = await loop.run_in_executor(executor, scrape_all_messages, driver)
+    processed_counts.update(baseline)
+    print(f"Baseline: {sum(baseline.values())} existing messages ignored.")
+    print(f"Jenny is listening with up to {MAX_CONCURRENT_REQUESTS} concurrent requests... (Ctrl+C to stop)")
+
+    # pending_cooldown: list of (sender, message) waiting for cooldown to expire
+    pending_cooldown = []
 
     while True:
         try:
-            if time.time() - last_queue_reset > 60:
-                queue.clear()
-                last_queue_reset = time.time()
-                print("Queue reset")
+            current = await loop.run_in_executor(executor, scrape_all_messages, driver)
 
-            get_latest_message_with_sender(driver)
-            sender, message = queue[-1] if queue else (None, None)
+            # Find genuinely new messages: current count exceeds processed count
+            new_messages = []
+            for key, count in current.items():
+                extra = count - processed_counts[key]
+                if extra > 0:
+                    sender, text = key
+                    for _ in range(extra):
+                        new_messages.append((sender, text))
 
-            if message and message != last_processed:
-                last_processed = message
-                if check_macro(message):
-                    continue
-                if any(t in message.lower() for t in TRIGGERS):
-                    if time.time() - last_response_time < RESPONSE_COOLDOWN:
-                        print("Cooldown active, skipping...")
-                        continue
-                    last_response_time = time.time()
-                    print(f"Triggered by {sender}: {message}")
-                    response = ask_with_retry(message)
-                    print(f"Jenny: {response}")
-                    messenger(driver, sender, response)
+            for sender, message in new_messages:
+                print(f"[Queue] {sender}: {message!r}")
+                dispatched = try_dispatch(driver, sender, message, loop)
+                if dispatched:
+                    processed_counts[(sender, message)] += 1
+                else:
+                    # Cooldown blocked it - hold it and retry next poll
+                    print(f"[Cooldown] Holding: {sender}: {message!r}")
+                    pending_cooldown.append((sender, message))
+
+            # Retry anything that was blocked by cooldown
+            still_pending = []
+            for sender, message in pending_cooldown:
+                dispatched = try_dispatch(driver, sender, message, loop)
+                if dispatched:
+                    processed_counts[(sender, message)] += 1
+                else:
+                    still_pending.append((sender, message))
+            pending_cooldown = still_pending
 
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"[Error] {e}")
 
-        time.sleep(POLL_INTERVAL)
+        await asyncio.sleep(POLL_INTERVAL)
+
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
