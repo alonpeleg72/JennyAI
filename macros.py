@@ -16,14 +16,14 @@ def resolve_macro(message_text, silent=False):
     Returns (None, None) if no macro keyword is present.
     The caller uses the personality for this one message only, then discards it.
 
-    Special case: 'help' / 'עזרה' prints help and returns ("__help__", None)
+    Special case: '\help' / 'עזרה\ ' prints help and returns ("__help__", None)
     so the caller knows to skip the AI call entirely.
 
     silent=True suppresses console output (used during cooldown retries).
     """
     msg_lower = message_text.lower()
 
-    if "help" in msg_lower or "עזרה" in message_text:
+    if "\\help" in msg_lower or "עזרה\\ " in message_text:
         if not silent:
             print(_get_help_text())
         return ("__help__", None)
