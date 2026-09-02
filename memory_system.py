@@ -1,5 +1,5 @@
 """
-Memory System for Jenny AI
+Memory System for Donna AI
 Handles storage, retrieval, and management of user memories
 """
 

@@ -1,12 +1,12 @@
 MACRO_KEYWORDS = {
-    "sweetjenny": "sweet",
-    "גנינחמדה": "sweet",
-    "hassidicjenny": "hasidic",
-    "גניחסידה": "hasidic",
-    "defaultjenny": "default",
+    "sweetdonna": "sweet",
+    "דונה חמדה": "sweet",
+    "hassicdonna": "hasidic",
+    "דונה חסידה": "hasidic",
+    "defaultdonna": "default",
+    "donnasuits": "suits",
+    "דונהחליפה": "suits",
 }
-
-MACRO_STRIP = list(MACRO_KEYWORDS.keys())
 
 
 def resolve_macro(message_text, silent=False):
@@ -30,10 +30,7 @@ def resolve_macro(message_text, silent=False):
 
     for keyword, personality in MACRO_KEYWORDS.items():
         if keyword in msg_lower or keyword in message_text:
-            cleaned = message_text
-            for kw in MACRO_STRIP:
-                cleaned = cleaned.replace(kw, "").replace(kw.lower(), "")
-            cleaned = cleaned.strip()
+            cleaned = message_text.replace(keyword, "").replace(keyword.lower(), "").strip()
             if not silent:
                 print(f"[Macro] One-shot personality: {personality} | Prompt: {cleaned!r}")
             return (personality, cleaned)
@@ -44,9 +41,10 @@ def resolve_macro(message_text, silent=False):
 def _get_help_text():
     return (
         "Available macros (prefix your message with the keyword):\n"
-        "- sweetjenny or גנינחמדה: Jenny answers sweetly for that message only.\n"
-        "- hassidicjenny or גניחסידה: Jenny answers in hasidic mode for that message only.\n"
-        "- defaultjenny: Jenny answers in default mode for that message only.\n"
+        "- sweetdonna or דונה חמדה: Donna answers sweetly for that message only.\n"
+        "- hassicdonna or דונה חסידה: Donna answers in hasidic mode for that message only.\n"
+        "- donnasuits or דונהחליפה: Donna answers like donna from suits mode for that message only.\n"
+        "- defaultdonna: Donna answers in default mode for that message only.\n"
         "- help or עזרה: Show this message.\n"
-        "After the macro message Jenny always returns to default."
+        "After the macro message Donna always returns to default."
     )
